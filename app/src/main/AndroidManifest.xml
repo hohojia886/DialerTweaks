@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.DialerTweaks">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Dialer Tweaks: Call Recording and Disable Voice Announcement for Google Dialer." />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="102" />
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name=".providers.RemotePrefProvider"
+            android:authorities="io.github.hohojia886.dialertweaks"
+            android:exported="true"
+            android:directBootAware="true" />
+
+    </application>
+</manifest>
