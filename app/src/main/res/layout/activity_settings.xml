@@ -31,6 +31,7 @@
             android:orientation="vertical"
             android:padding="16dp">
 
+            <!-- Dialer Mods -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -68,18 +69,30 @@
                         android:textAppearance="?attr/textAppearanceLabelSmall"
                         android:textColor="?attr/colorError" />
 
-                    <com.google.android.material.materialswitch.MaterialSwitch
-                        android:id="@+id/switch_disable_announcement"
+                    <LinearLayout
+                        android:id="@+id/layout_call_recording_sub"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="24dp"
                         android:layout_marginTop="8dp"
-                        app:thumbIcon="@drawable/ic_switch_check"
-                        android:text="@string/disable_voice_announcement" />
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <com.google.android.material.materialswitch.MaterialSwitch
+                            android:id="@+id/switch_disable_announcement"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            app:thumbIcon="@drawable/ic_switch_check"
+                            android:text="@string/disable_voice_announcement" />
+
+                    </LinearLayout>
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- Debug Card -->
             <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_debug"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
@@ -107,6 +120,24 @@
                         app:thumbIcon="@drawable/ic_switch_check"
                         android:text="@string/enable_master_log" />
 
+                    <LinearLayout
+                        android:id="@+id/layout_debug_sub_settings"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:orientation="vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:visibility="gone">
+
+                        <com.google.android.material.materialswitch.MaterialSwitch
+                            android:id="@+id/switch_log_call_recording"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            app:thumbIcon="@drawable/ic_switch_check"
+                            android:text="@string/log_call_rec" />
+
+                    </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

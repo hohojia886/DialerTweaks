@@ -9,11 +9,14 @@ import android.os.Bundle
 import android.os.Process
 import io.github.hohojia886.dialertweaks.utils.IpcManager
 
+/**
+ * Secure ContentProvider for cross-process preferences.
+ */
 class RemotePrefProvider : ContentProvider() {
 
     private val trustedUids = mutableSetOf<Int>()
     private var lastUpdate = 0L
-    private val CACHE_TIMEOUT = 300_000L
+    private val CACHE_TIMEOUT = 300_000L // 5 minutes
 
     override fun onCreate(): Boolean = true
 
@@ -23,13 +26,16 @@ class RemotePrefProvider : ContentProvider() {
 
         synchronized(trustedUids) {
             trustedUids.clear()
-            trustedUids.add(1000)
-            trustedUids.add(Process.myUid())
+            trustedUids.add(1000) // System Server
+            trustedUids.add(Process.myUid()) // Module itself
 
             val pm = context?.packageManager ?: return
             val packages = listOf(
+                "com.android.systemui",
                 "com.google.android.dialer",
-                "com.android.dialer"
+                "com.android.dialer",
+                "com.google.android.as",
+                "com.google.android.gms"
             )
 
             packages.forEach { pkg ->
@@ -45,11 +51,16 @@ class RemotePrefProvider : ContentProvider() {
         val callingUid = Binder.getCallingUid()
         updateTrustedUids()
 
+        // 1. Strict WRITE Control: Only the module app can modify settings
         if (method == "put") {
-            if (callingUid != Process.myUid()) return null
+            if (callingUid != Process.myUid()) {
+                android.util.Log.e("DT_Security", "Blocked unauthorized WRITE from UID: $callingUid")
+                return null
+            }
             return handlePut(extras)
         }
 
+        // 2. READ Control
         if (method == "get") {
             val isWhitelisted = callingUid < 1000 || trustedUids.contains(callingUid)
             if (!isWhitelisted) return null
@@ -63,10 +74,14 @@ class RemotePrefProvider : ContentProvider() {
         val deContext = context?.createDeviceProtectedStorageContext() ?: return null
         val prefs = deContext.getSharedPreferences(IpcManager.PREF_NAME, 0)
         val res = Bundle()
+
         prefs.all.forEach { (k, v) ->
             when (v) {
                 is Boolean -> res.putBoolean(k, v)
                 is Int -> res.putInt(k, v)
+                is Long -> res.putLong(k, v)
+                is Float -> res.putFloat(k, v)
+                is String -> res.putString(k, v)
             }
         }
         return res
@@ -81,6 +96,9 @@ class RemotePrefProvider : ContentProvider() {
             when (v) {
                 is Boolean -> edit.putBoolean(k, v)
                 is Int -> edit.putInt(k, v)
+                is Long -> edit.putLong(k, v)
+                is Float -> edit.putFloat(k, v)
+                is String -> edit.putString(k, v)
             }
         }
         edit.apply()
