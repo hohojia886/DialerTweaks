@@ -25,6 +25,7 @@ object CallNotesHook {
 
     private const val TAG = "DT_CallNotes"
     @Volatile private var isSilenceEnabled = true
+    private var receiverRegistered = false
     private var currentPkg = "unknown"
 
     /**
@@ -61,7 +62,7 @@ object CallNotesHook {
     private fun syncState(module: XposedModule) {
         runCatching {
             val prefs = module.getRemotePreferences(IpcManager.PREF_NAME)
-            isSilenceEnabled = prefs.getBoolean(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, true)
+            isSilenceEnabled = prefs.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true)
         }
     }
 
@@ -144,9 +145,16 @@ object CallNotesHook {
     }
 
     private fun registerReceiver(context: Context, moduleUid: Int) {
+        if (receiverRegistered) return
         IpcManager.registerSecureReceiver(context, moduleUid) { intent ->
-            isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.EXTRA_VALUE, true)
+            val key = intent.getStringExtra(PreferenceKeys.EXTRA_KEY)
+            if (intent.action == IpcManager.ACTION_SETTINGS_SYNC) {
+                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true)
+            } else if (key == PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT) {
+                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.EXTRA_VALUE, true)
+            }
             Log.d(TAG, "[$currentPkg] Updated isSilenceEnabled: $isSilenceEnabled")
         }
+        receiverRegistered = true
     }
 }

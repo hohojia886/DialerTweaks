@@ -53,6 +53,7 @@
                         android:textAppearance="?attr/textAppearanceTitleLarge"
                         android:textColor="?attr/colorPrimary" />
 
+                    <!-- Section 1: Standard Call Recording (Linked) -->
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/switch_call_recording"
                         android:layout_width="match_parent"
@@ -74,7 +75,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="24dp"
-                        android:layout_marginTop="8dp"
+                        android:layout_marginTop="0dp"
                         android:orientation="vertical"
                         android:visibility="gone">
 
@@ -86,6 +87,22 @@
                             android:text="@string/disable_voice_announcement" />
 
                     </LinearLayout>
+
+                    <!-- Divider separating Call Recording group from Call Notes -->
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginTop="12dp"
+                        android:layout_marginBottom="12dp"
+                        android:background="?attr/colorOutlineVariant" />
+
+                    <!-- Section 2: Call Notes (Independent) -->
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_disable_call_notes_announcement"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        app:thumbIcon="@drawable/ic_switch_check"
+                        android:text="@string/disable_call_notes_announcement" />
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>

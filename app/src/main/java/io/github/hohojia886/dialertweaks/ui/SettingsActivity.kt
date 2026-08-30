@@ -36,27 +36,26 @@ class SettingsActivity : AppCompatActivity() {
         val layoutCallRecordingSub = findViewById<View>(R.id.layout_call_recording_sub)
         val switchDisableAnnouncement = findViewById<MaterialSwitch>(R.id.switch_disable_announcement)
 
-        // 1. Setup sub-switch first so its listener is ready for linkage calls
+        // 1. Setup Standard Disable Voice Announcement (Sub of Call Recording)
         setupM3Switch(cePrefs, dePrefs, R.id.switch_disable_announcement, PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, true)
 
-        // 2. Setup main switch with linkage logic
+        // 2. Setup Call Recording Main Switch (Links to Disable Voice Announcement)
         setupM3Switch(cePrefs, dePrefs, R.id.switch_call_recording, PreferenceKeys.ENABLE_CALL_RECORDING, true) { isChecked ->
             layoutCallRecordingSub.visibility = if (isChecked) View.VISIBLE else View.GONE
             if (!isChecked) {
-                // Linkage: If Call Recording is off, Disable Voice Announcement must be off too
+                // Linkage: If main toggle is off, sub-bypass must be off too
                 if (switchDisableAnnouncement.isChecked) {
                     switchDisableAnnouncement.isChecked = false
-                    // The switch listener set up above will handle saving and broadcasting
                 } else {
-                    // Safety: ensure backend is also false even if UI is already false
                     saveDoublePref(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, false, cePrefs, dePrefs)
                     IpcManager.sendUpdateBroadcast(this, PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, false)
                 }
             }
         }
-        
-        // Initial visibility sync
         layoutCallRecordingSub.visibility = if (dePrefs.getBoolean(PreferenceKeys.ENABLE_CALL_RECORDING, true)) View.VISIBLE else View.GONE
+
+        // 3. Setup Call Notes Announcement (Independent)
+        setupM3Switch(cePrefs, dePrefs, R.id.switch_disable_call_notes_announcement, PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true)
 
         // Debug Card
         setupDebugCard(dePrefs, cePrefs)

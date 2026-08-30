@@ -5,6 +5,7 @@
     <string name="enable_call_recording">Call Recording</string>
     <string name="call_rec_warning">Note: If Dialer app is force-stopped, it may take a few seconds for hooks to re-apply.</string>
     <string name="disable_voice_announcement">Disable Voice Announcement</string>
+    <string name="disable_call_notes_announcement">Disable Call Notes Announcement</string>
 
     <string name="version_display">v%1$s</string>
 
