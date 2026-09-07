@@ -1,15 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- General -->
     <string name="app_name">Dialer Tweaks</string>
+    <string name="module_active">Module is active</string>
+    <string name="version_display">v%1$s</string>
+
+    <!-- Google Dialer Section -->
     <string name="dialer_mods">Google Dialer</string>
     <string name="enable_call_recording">Call Recording</string>
-    <string name="call_rec_warning">Note: If Dialer app is force-stopped, it may take a few seconds for hooks to re-apply.</string>
     <string name="disable_voice_announcement">Disable Voice Announcement</string>
     <string name="disable_call_notes_announcement">Disable Call Notes Announcement</string>
 
-    <string name="version_display">v%1$s</string>
-
+    <!-- Debug & Logs Section -->
     <string name="debug_logs_title">Debug &amp; Logs</string>
     <string name="enable_master_log">Enable Master Logging</string>
-    <string name="log_call_rec">DT_CallRec</string>
+    <string name="log_call_rec">DLTK_CallRec</string>
+    <string name="log_call_notes">DLTK_CallNotes</string>
 </resources>

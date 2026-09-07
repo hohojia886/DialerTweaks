@@ -7,11 +7,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.Process
+import android.util.Log
 import java.lang.ref.WeakReference
 
 /**
- * Utilities for cross-process communication and settings synchronization.
- * Handles both standard synchronization and secure broadcast management.
+ * IpcManager: Orchestrates cross-process communication and settings synchronization.
+ * Manages secure broadcast registration, system context retrieval via reflection,
+ * and ensures that all hook instances across different processes stay in sync with the UI.
  */
 object IpcManager {
     const val PREF_NAME = "io.github.hohojia886.dialertweaks"
@@ -19,11 +21,9 @@ object IpcManager {
     const val ACTION_SETTINGS_SYNC = "io.github.hohojia886.dialertweaks.SETTINGS_SYNC"
     const val PERMISSION_SYNC_SETTINGS = "io.github.hohojia886.dialertweaks.permission.SYNC_SETTINGS"
 
-    private var sysContextRef: WeakReference<Context>? = null
+    private var sysContextRef: WeakReference<Context>? = null // Cached system context
 
-    /**
-     * Unified helper to get System Context via reflection.
-     */
+    // Retrieves the underlying system context using ActivityThread reflection
     fun getSystemContext(classLoader: ClassLoader): Context? {
         sysContextRef?.get()?.let { return it }
         return runCatching {
@@ -35,9 +35,7 @@ object IpcManager {
         }.getOrNull()
     }
 
-    /**
-     * Gets a context suitable for ContentProvider calls (matching the current process UID).
-     */
+    // Obtains a context suitable for ContentProvider calls, matching the current process identity
     fun getSafeContext(classLoader: ClassLoader, packageName: String? = null): Context? {
         return runCatching {
             val atClass = classLoader.loadClass("android.app.ActivityThread")
@@ -46,7 +44,6 @@ object IpcManager {
             
             if (app != null) return app
 
-            // If application is null, try to create a context for the current process
             val sysContext = atClass.getDeclaredMethod("getSystemContext").invoke(at) as? Context ?: return null
             
             val myUid = Process.myUid()
@@ -66,28 +63,28 @@ object IpcManager {
         }.getOrNull()
     }
 
-    /**
-     * Sends a full settings synchronization broadcast to all listening hook processes.
-     */
+    // Dispatches a full settings synchronization broadcast to all active hook processes
     @SuppressLint("WrongConstant")
     fun syncAllSettings(context: Context, prefs: SharedPreferences) {
         val intent = Intent(ACTION_SETTINGS_SYNC).apply {
+            // 1. CallRec
             putExtra(PreferenceKeys.ENABLE_CALL_RECORDING, prefs.getBoolean(PreferenceKeys.ENABLE_CALL_RECORDING, true))
             putExtra(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, prefs.getBoolean(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, true))
-            putExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, prefs.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true))
-            
-            // Debug Logs Configuration
-            putExtra(PreferenceKeys.ENABLE_MASTER_LOG, prefs.getBoolean(PreferenceKeys.ENABLE_MASTER_LOG, false))
             putExtra(PreferenceKeys.LOG_CALL_RECORDING, prefs.getBoolean(PreferenceKeys.LOG_CALL_RECORDING, true))
+
+            // 2. CallNotes
+            putExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, prefs.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true))
+            putExtra(PreferenceKeys.LOG_CALL_NOTES, prefs.getBoolean(PreferenceKeys.LOG_CALL_NOTES, true))
+
+            // General / Debug
+            putExtra(PreferenceKeys.ENABLE_MASTER_LOG, prefs.getBoolean(PreferenceKeys.ENABLE_MASTER_LOG, false))
 
             addFlags(0x01000000) // FLAG_RECEIVER_INCLUDE_BACKGROUND
         }
         context.sendBroadcast(intent)
     }
 
-    /**
-     * Sends a single-key update broadcast when a specific setting is toggled.
-     */
+    // Dispatches a broadcast for a single preference change to minimize IPC overhead
     @SuppressLint("WrongConstant")
     fun sendUpdateBroadcast(context: Context, key: String, value: Any) {
         val intent = Intent(ACTION_SETTING_CHANGED).apply {
@@ -103,9 +100,7 @@ object IpcManager {
         context.sendBroadcast(intent)
     }
 
-    /**
-     * Standard sync registration. Uses signature-level protection.
-     */
+    // Registers a receiver with UID verification to ensure settings are only accepted from trusted sources
     fun registerSecureReceiver(
         context: Context,
         moduleUid: Int,
@@ -126,22 +121,18 @@ object IpcManager {
                         method.invoke(this) as Int
                     }.getOrDefault(-1)
 
-                    // Trusted: System (1000), Module, or current process
-                    // Note: senderUid might be -1 on some devices for dynamic receivers.
                     if (senderUid == 1000 || senderUid == moduleUid || senderUid == Process.myUid() || senderUid == -1) {
-                        runCatching { Logger.handleBroadcast(intent) }
+                        Logger.handleBroadcast(intent)
                         onVerifiedBroadcast(intent)
                     } else {
-                        android.util.Log.w("DT_Secure", "Rejected broadcast from unauthorized UID: $senderUid")
+                        Log.w("DLTK_Secure", "Rejected broadcast from unauthorized UID: $senderUid")
                     }
                 }
             }
             val targetContext = context.applicationContext ?: context
-            // Manual UID verification is performed in onReceive, so we can pass null for permission 
-            // to ensure maximum compatibility with system-level background processes.
             targetContext.registerReceiver(receiver, filter, null, null, Context.RECEIVER_EXPORTED)
         } catch (t: Throwable) {
-            android.util.Log.wtf("DT_Secure", "CRITICAL: Receiver registration failed", t)
+            Log.wtf("DLTK_Secure", "CRITICAL: Receiver registration failed", t)
         }
     }
 }

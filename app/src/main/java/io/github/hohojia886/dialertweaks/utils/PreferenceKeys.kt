@@ -1,7 +1,7 @@
 package io.github.hohojia886.dialertweaks.utils
 
 /**
- * Single source of truth for every settings key used across the module.
+ * Single source of truth for every settings key used across DialerTweaks.
  */
 object PreferenceKeys {
 
@@ -17,4 +17,5 @@ object PreferenceKeys {
     // ---- Debug logging configuration ---------------------------------------
     const val ENABLE_MASTER_LOG = "enable_master_log"
     const val LOG_CALL_RECORDING = "log_call_recording"
+    const val LOG_CALL_NOTES = "log_call_notes"
 }
