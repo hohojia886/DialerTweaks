@@ -1,7 +1,7 @@
 package io.github.hohojia886.dialertweaks.utils
 
 /**
- * Single source of truth for every settings key used across the module.
+ * Single source of truth for every settings key used across DialerTweaks.
  */
 object PreferenceKeys {
 
