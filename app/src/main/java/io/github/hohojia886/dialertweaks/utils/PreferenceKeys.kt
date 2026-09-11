@@ -17,4 +17,5 @@ object PreferenceKeys {
     // ---- Debug logging configuration ---------------------------------------
     const val ENABLE_MASTER_LOG = "enable_master_log"
     const val LOG_CALL_RECORDING = "log_call_recording"
+    const val LOG_CALL_NOTES = "log_call_notes"
 }

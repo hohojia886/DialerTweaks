@@ -6,12 +6,17 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.net.Uri
+import android.os.Bundle
 import android.os.Process
+import android.util.Log
+import io.github.libxposed.api.XposedModule
 import java.lang.ref.WeakReference
 
 /**
- * Utilities for cross-process communication and settings synchronization.
- * Handles both standard synchronization and secure broadcast management.
+ * IpcManager: Orchestrates cross-process communication and settings synchronization.
+ * Manages secure broadcast registration, system context retrieval via reflection,
+ * and ensures that all hook instances across different processes stay in sync with the UI.
  */
 object IpcManager {
     const val PREF_NAME = "io.github.hohojia886.dialertweaks"
@@ -46,7 +51,6 @@ object IpcManager {
             
             if (app != null) return app
 
-            // If application is null, try to create a context for the current process
             val sysContext = atClass.getDeclaredMethod("getSystemContext").invoke(at) as? Context ?: return null
             
             val myUid = Process.myUid()
@@ -58,12 +62,81 @@ object IpcManager {
                 packages?.get(0) as? String
             }.getOrNull()
 
-            if (myUid != 1000 && targetPackage != null && targetPackage != "android") {
-                sysContext.createPackageContext(targetPackage, 0)
+            if (myUid != 1000 && targetPackage != null && targetPackage != "android" && targetPackage != "unknown") {
+                runCatching { sysContext.createPackageContext(targetPackage, 0) }.getOrDefault(sysContext)
             } else {
                 sysContext
             }
         }.getOrNull()
+    }
+
+    /**
+     * Unified preference loader: Prioritizes RemotePreferences, falls back to DE ContentProvider if RemotePreferences is empty or missing.
+     */
+    fun loadPreferences(module: XposedModule, classLoader: ClassLoader? = null, packageName: String? = null): Bundle {
+        val bundle = Bundle()
+        
+        // 1. Primary: Xposed/LSPosed RemotePreferences
+        val prefs = runCatching { module.getRemotePreferences(PREF_NAME) }.getOrNull()
+        if (prefs != null) {
+            runCatching {
+                prefs.all.forEach { (k, v) ->
+                    when (v) {
+                        is Boolean -> bundle.putBoolean(k, v)
+                        is Int -> bundle.putInt(k, v)
+                        is Float -> bundle.putFloat(k, v)
+                        is Long -> bundle.putLong(k, v)
+                        is String -> bundle.putString(k, v)
+                    }
+                }
+            }
+            val knownBooleans = listOf(
+                PreferenceKeys.ENABLE_CALL_RECORDING,
+                PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT,
+                PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT,
+                PreferenceKeys.ENABLE_MASTER_LOG,
+                PreferenceKeys.LOG_CALL_RECORDING,
+                PreferenceKeys.LOG_CALL_NOTES
+            )
+            val defaultFalseKeys = setOf(
+                PreferenceKeys.ENABLE_CALL_RECORDING,
+                PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT,
+                PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT,
+                PreferenceKeys.ENABLE_MASTER_LOG
+            )
+            knownBooleans.forEach { key ->
+                runCatching {
+                    val defaultVal = key !in defaultFalseKeys
+                    val v = prefs.getBoolean(key, defaultVal)
+                    bundle.putBoolean(key, v)
+                }
+            }
+        }
+
+        // 2. Fallback / Overlay: Direct DE Storage ContentProvider query if RemotePreferences is empty or missing
+        if (classLoader != null && (bundle.isEmpty || prefs == null || prefs.all.isEmpty())) {
+            runCatching {
+                val ctx = getSafeContext(classLoader, packageName) ?: getSystemContext(classLoader)
+                if (ctx != null) {
+                    val uri = Uri.parse("content://$PREF_NAME")
+                    val cpBundle = ctx.contentResolver.call(uri, "get", null, null)
+                    if (cpBundle != null && !cpBundle.isEmpty) {
+                        cpBundle.keySet().forEach { k ->
+                            val v = cpBundle.get(k)
+                            when (v) {
+                                is Boolean -> bundle.putBoolean(k, v)
+                                is Int -> bundle.putInt(k, v)
+                                is Float -> bundle.putFloat(k, v)
+                                is Long -> bundle.putLong(k, v)
+                                is String -> bundle.putString(k, v)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return bundle
     }
 
     /**
@@ -72,13 +145,14 @@ object IpcManager {
     @SuppressLint("WrongConstant")
     fun syncAllSettings(context: Context, prefs: SharedPreferences) {
         val intent = Intent(ACTION_SETTINGS_SYNC).apply {
-            putExtra(PreferenceKeys.ENABLE_CALL_RECORDING, prefs.getBoolean(PreferenceKeys.ENABLE_CALL_RECORDING, true))
+            putExtra(PreferenceKeys.ENABLE_CALL_RECORDING, prefs.getBoolean(PreferenceKeys.ENABLE_CALL_RECORDING, false))
             putExtra(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, prefs.getBoolean(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, true))
-            putExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, prefs.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true))
+            putExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, prefs.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, false))
             
             // Debug Logs Configuration
             putExtra(PreferenceKeys.ENABLE_MASTER_LOG, prefs.getBoolean(PreferenceKeys.ENABLE_MASTER_LOG, false))
             putExtra(PreferenceKeys.LOG_CALL_RECORDING, prefs.getBoolean(PreferenceKeys.LOG_CALL_RECORDING, true))
+            putExtra(PreferenceKeys.LOG_CALL_NOTES, prefs.getBoolean(PreferenceKeys.LOG_CALL_NOTES, true))
 
             addFlags(0x01000000) // FLAG_RECEIVER_INCLUDE_BACKGROUND
         }
@@ -104,7 +178,7 @@ object IpcManager {
     }
 
     /**
-     * Standard sync registration. Uses signature-level protection.
+     * Standard sync registration. Uses UID verification.
      */
     fun registerSecureReceiver(
         context: Context,
@@ -126,22 +200,18 @@ object IpcManager {
                         method.invoke(this) as Int
                     }.getOrDefault(-1)
 
-                    // Trusted: System (1000), Module, or current process
-                    // Note: senderUid might be -1 on some devices for dynamic receivers.
                     if (senderUid == 1000 || senderUid == moduleUid || senderUid == Process.myUid() || senderUid == -1) {
                         runCatching { Logger.handleBroadcast(intent) }
                         onVerifiedBroadcast(intent)
                     } else {
-                        android.util.Log.w("DT_Secure", "Rejected broadcast from unauthorized UID: $senderUid")
+                        Log.w("DT_Secure", "Rejected broadcast from unauthorized UID: $senderUid")
                     }
                 }
             }
             val targetContext = context.applicationContext ?: context
-            // Manual UID verification is performed in onReceive, so we can pass null for permission 
-            // to ensure maximum compatibility with system-level background processes.
             targetContext.registerReceiver(receiver, filter, null, null, Context.RECEIVER_EXPORTED)
         } catch (t: Throwable) {
-            android.util.Log.wtf("DT_Secure", "CRITICAL: Receiver registration failed", t)
+            Log.wtf("DT_Secure", "CRITICAL: Receiver registration failed", t)
         }
     }
 }

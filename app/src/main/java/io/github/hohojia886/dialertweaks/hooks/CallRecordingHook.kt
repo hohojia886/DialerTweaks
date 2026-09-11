@@ -4,17 +4,22 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Resources
 import android.os.Bundle
+import android.os.Process
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.telephony.TelephonyManager
 import io.github.hohojia886.dialertweaks.utils.IpcManager
 import io.github.hohojia886.dialertweaks.utils.Logger
 import io.github.hohojia886.dialertweaks.utils.PreferenceKeys
+import io.github.hohojia886.dialertweaks.utils.hookBefore
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import org.luckypray.dexkit.DexKitBridge
 import java.io.File
 import java.lang.ref.WeakReference
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 
 /**
@@ -31,12 +36,13 @@ object CallRecordingHook {
         "canRecordCall", "Crosby", "GeoFence", "isCallRecordingCountry"
     )
 
-    @Volatile private var isRecordingEnabled = true
-    @Volatile private var isSilenceEnabled = true
+    @Volatile private var isRecordingEnabled = false
+    @Volatile private var isSilenceEnabled = false
     private var receiverRegistered = false
     private var sessionRetryCount = 0
     
     @Volatile private var lastListener: WeakReference<UtteranceProgressListener>? = null
+    @Volatile private var lastResourceReadTime = 0L
     @Volatile private var startId = -1
     @Volatile private var endId = -1
 
@@ -44,7 +50,7 @@ object CallRecordingHook {
         val byteRate = sampleRate * channels * (bitsPerSample / 8)
         val blockAlign = channels * (bitsPerSample / 8)
         val dataSize = 0 
-        val buffer = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val buffer = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put("RIFF".toByteArray(Charsets.US_ASCII))
         buffer.putInt(36 + dataSize)
         buffer.put("WAVE".toByteArray(Charsets.US_ASCII))
@@ -61,11 +67,23 @@ object CallRecordingHook {
         return buffer.array()
     }
 
-    private fun syncState(module: XposedModule) {
+    private fun isCallRecordingAnnouncementCaller(): Boolean {
+        val stack = Thread.currentThread().stackTrace
+        return stack.any {
+            val cls = it.className
+            cls.contains("CallRecording", true) ||
+            cls.contains("AudioInjector", true) ||
+            cls.contains("Crosby", true) ||
+            cls.contains("callrecording", true) ||
+            cls.contains("Fermat", true)
+        }
+    }
+
+    private fun syncState(module: XposedModule, classLoader: ClassLoader) {
         runCatching {
-            val prefs = module.getRemotePreferences(IpcManager.PREF_NAME)
-            isRecordingEnabled = prefs.getBoolean(PreferenceKeys.ENABLE_CALL_RECORDING, true)
-            isSilenceEnabled = prefs.getBoolean(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, true)
+            val bundle = IpcManager.loadPreferences(module, classLoader, "com.google.android.dialer")
+            isRecordingEnabled = bundle.getBoolean(PreferenceKeys.ENABLE_CALL_RECORDING, false)
+            isSilenceEnabled = bundle.getBoolean(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, false)
             Logger.i(TAG, "Sync", "State synced: recording=$isRecordingEnabled, silence=$isSilenceEnabled")
             Logger.sync(module)
         }.onFailure { e ->
@@ -75,11 +93,17 @@ object CallRecordingHook {
 
     fun hook(module: XposedModule, classLoader: ClassLoader, packageName: String) {
         Logger.i(TAG, "Init", "Initializing CallRecording module v$VERSION")
-        syncState(module)
+        syncState(module, classLoader)
         val moduleUid = module.getModuleApplicationInfo().uid
 
+        if (Process.myUid() == 1000) {
+            IpcManager.getSafeContext(classLoader, packageName)?.let { ctx ->
+                registerReceiver(ctx, moduleUid)
+                syncState(module, classLoader)
+            }
+        }
+
         try {
-            // 1. Telephony ISO Hook
             // 1. Telephony ISO Hook
             val tm = TelephonyManager::class.java
             val isoInterceptor: (XposedInterface.Chain) -> Any? = { chain ->
@@ -96,13 +120,13 @@ object CallRecordingHook {
             }
 
             // 2. Application Lifecycle
-            module.hook(classLoader.loadClass("android.app.Application").getDeclaredMethod("onCreate")).intercept { chain ->
+            val appClass = classLoader.loadClass("android.app.Application")
+            module.hookBefore(appClass.getDeclaredMethod("onCreate")) { chain ->
                 val app = chain.thisObject as? Context
                 if (app != null) {
                     registerReceiver(app, moduleUid)
-                    syncState(module)
+                    syncState(module, classLoader)
                 }
-                chain.proceed()
             }
 
             // 3. Resource Hook (getString)
@@ -115,6 +139,7 @@ object CallRecordingHook {
                 }
                 val resId = chain.args[0] as Int
                 if (resId != 0 && (resId == startId || resId == endId)) {
+                    lastResourceReadTime = SystemClock.uptimeMillis()
                     Logger.i(TAG, "Active", "Muting voice announcement (getString): $resId")
                     ""
                 } else chain.proceed()
@@ -131,6 +156,7 @@ object CallRecordingHook {
                     }
                     val resId = chain.args[0] as Int
                     if (resId != 0 && (resId == startId || resId == endId)) {
+                        lastResourceReadTime = SystemClock.uptimeMillis()
                         Logger.i(TAG, "Active", "Muting voice announcement (getText): $resId")
                         ""
                     } else chain.proceed()
@@ -229,10 +255,7 @@ object CallRecordingHook {
         if (!cacheFile.exists()) return false
         return runCatching {
             val lines = cacheFile.readLines()
-            if (lines.isEmpty()) return false
-
-            val firstLine = lines[0].split("|")
-            if (firstLine.size != 2 || firstLine[0] != "VERSION" || firstLine[1].toLong() != currentVersion) return false
+            if (lines.isEmpty() || !lines[0].startsWith("VERSION|$currentVersion")) return false
 
             lines.drop(1).forEach { line ->
                 runCatching {
@@ -260,48 +283,24 @@ object CallRecordingHook {
     }
 
     private fun hookTtsHooks(module: XposedModule) {
-        val ctorInterceptor: (XposedInterface.Chain) -> Any? = { chain ->
-            val listener = chain.args[1] as? TextToSpeech.OnInitListener
-            if (isRecordingEnabled && isSilenceEnabled && listener != null) {
-                Logger.i(TAG, "Active", "Hijacking TTS initialization -> SUCCESS")
-                runCatching { listener.onInit(TextToSpeech.SUCCESS) }
-            }
-            chain.proceed()
-        }
-
-        runCatching {
-            val c1 = TextToSpeech::class.java.getDeclaredConstructor(Context::class.java, TextToSpeech.OnInitListener::class.java)
-            module.hook(c1).intercept(ctorInterceptor)
-            val c2 = TextToSpeech::class.java.getDeclaredConstructor(Context::class.java, TextToSpeech.OnInitListener::class.java, String::class.java)
-            module.hook(c2).intercept(ctorInterceptor)
-        }.onFailure { e ->
-            Logger.e(TAG, "Error", "TTS constructor hooks failed", e)
-        }
-
-        runCatching {
-            val m = TextToSpeech::class.java.getDeclaredMethod("isLanguageAvailable", Locale::class.java)
-            module.hook(m).intercept { TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE }
-        }.onFailure { e ->
-            Logger.e(TAG, "Error", "isLanguageAvailable hook failed", e)
-        }
-
         runCatching {
             val m = TextToSpeech::class.java.getDeclaredMethod("setOnUtteranceProgressListener", UtteranceProgressListener::class.java)
-            module.hook(m).intercept { chain ->
+            module.hookBefore(m) { chain ->
                 lastListener = (chain.args[0] as? UtteranceProgressListener)?.let { WeakReference(it) }
-                chain.proceed()
             }
         }.onFailure { e ->
             Logger.e(TAG, "Error", "setOnUtteranceProgressListener hook failed", e)
         }
 
         val speakInterceptor: (XposedInterface.Chain) -> Any? = { chain ->
-            if (isRecordingEnabled && isSilenceEnabled) {
-                val utteranceId = chain.args[3] as? String
-                val targetFile = if (chain.args.size >= 3 && chain.args[2] is File) chain.args[2] as File else null
-                
-                Logger.i(TAG, "Active", "Bypassing TTS playback: $utteranceId")
+            val utteranceId = chain.args.getOrNull(3) as? String
+            val targetFile = if (chain.args.size >= 3 && chain.args[2] is File) chain.args[2] as File else null
+            
+            val now = SystemClock.uptimeMillis()
+            val isRecentResourceRead = (now - lastResourceReadTime) < 500L
+            val isRecordingCaller = isCallRecordingAnnouncementCaller()
 
+            if (isRecordingEnabled && isSilenceEnabled && (isRecentResourceRead || isRecordingCaller)) {
                 if (targetFile != null) {
                     runCatching { targetFile.outputStream().use { it.write(buildSilentWav()) } }
                 }
@@ -335,12 +334,12 @@ object CallRecordingHook {
         IpcManager.registerSecureReceiver(context, moduleUid) { intent ->
             val action = intent.action ?: return@registerSecureReceiver
             if (action == IpcManager.ACTION_SETTINGS_SYNC) {
-                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, true)
-                isRecordingEnabled = intent.getBooleanExtra(PreferenceKeys.ENABLE_CALL_RECORDING, true)
+                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT, false)
+                isRecordingEnabled = intent.getBooleanExtra(PreferenceKeys.ENABLE_CALL_RECORDING, false)
                 Logger.i(TAG, "Sync", "Full sync received: recording=$isRecordingEnabled, silence=$isSilenceEnabled")
             } else {
                 val key = intent.getStringExtra(PreferenceKeys.EXTRA_KEY) ?: return@registerSecureReceiver
-                val value = intent.getBooleanExtra(PreferenceKeys.EXTRA_VALUE, true)
+                val value = intent.getBooleanExtra(PreferenceKeys.EXTRA_VALUE, false)
                 when (key) {
                     PreferenceKeys.DISABLE_VOICE_ANNOUNCEMENT -> {
                         isSilenceEnabled = value

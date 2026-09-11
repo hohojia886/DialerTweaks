@@ -3,121 +3,136 @@ package io.github.hohojia886.dialertweaks.hooks
 import android.content.Context
 import android.media.AudioTrack
 import android.media.MediaPlayer
-import android.media.SoundPool
-import android.media.ToneGenerator
 import android.media.Ringtone
-import android.util.Log
+import android.media.ToneGenerator
+import android.os.Process
 import io.github.hohojia886.dialertweaks.utils.IpcManager
 import io.github.hohojia886.dialertweaks.utils.Logger
 import io.github.hohojia886.dialertweaks.utils.PreferenceKeys
 import io.github.hohojia886.dialertweaks.utils.hookAfter
 import io.github.hohojia886.dialertweaks.utils.hookBefore
-import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import java.nio.ByteBuffer
 import java.util.Arrays
+import java.util.Collections
+import java.util.WeakHashMap
 
 /**
- * Finalized Silence Module for Fermat / Call Notes / SODA.
- * Uses stack-trace pattern matching to identify and mute recording announcements.
+ * CallNotesHook: Silences AI recording announcements.
+ * Intercepts MediaPlayer and AudioTrack playbacks by analyzing stack traces 
+ * for AI-related components like Fermat or SODA, then mutes the audio.
  */
 object CallNotesHook {
 
-    private const val TAG = "DT_CallNotes"
-    @Volatile private var isSilenceEnabled = true
+    private const val TAG = "CallNotes"
+    @Volatile private var isSilenceEnabled = false // Global toggle for silence logic
+    private var currentPkg = "unknown" // Current process package name
     private var receiverRegistered = false
-    private var currentPkg = "unknown"
+    
+    // Performance: Cache instances identified as AI to avoid redundant stack trace scans
+    private val mutedInstances = Collections.newSetFromMap(WeakHashMap<Any, Boolean>())
 
-    /**
-     * Precision Identification of Fermat/Call-Notes callers.
-     */
-    private fun isFermatCaller(context: String): Boolean {
+    // Identifies if the current playback call originates from AI components
+    private fun isFermatCaller(context: String, instance: Any? = null): Boolean {
+        if (instance != null && mutedInstances.contains(instance)) return true
+
         val stack = Thread.currentThread().stackTrace
-        var matchedKeyword = ""
         val isFermat = stack.any {
             val cls = it.className
-            val match = when {
-                cls.contains("AudioInjector", true) -> "AudioInjector"
-                cls.contains("Fermat", true) -> "Fermat"
-                cls.contains("tidepods", true) -> "tidepods"
-                cls.contains("callrecording", true) -> "callrecording"
-                cls.contains("soda", true) -> "soda"
-                cls.contains("intelligence", true) -> "intelligence"
-                cls.contains("NotificationPlayer", true) -> "NotificationPlayer"
-                // Match obfuscated media callers in Dialer (e.g. oea.c, hsk.b)
-                cls.contains("media", true) && currentPkg.contains("dialer") -> "DialerMedia"
-                else -> null
-            }
-            if (match != null) matchedKeyword = match
-            match != null
+            cls.contains("AudioInjector", true) ||
+            cls.contains("Fermat", true) ||
+            cls.contains("tidepods", true) ||
+            cls.contains("callrecording", true) ||
+            cls.contains("soda", true) ||
+            cls.contains("intelligence", true) ||
+            cls.contains("NotificationPlayer", true) ||
+            cls.contains("transcript", true) ||
+            cls.contains("recorder", true) ||
+            (cls.contains("media", true) && currentPkg.contains("dialer"))
         }
 
         if (isFermat) {
-            Log.e(TAG, "[$currentPkg] Fermat Silenced ($matchedKeyword) via [$context]")
+            if (instance != null) mutedInstances.add(instance)
+            Logger.e(TAG, "Active", "Identified AI Announcer via [$context] in $currentPkg")
         }
         
         return isFermat
     }
 
-    private fun syncState(module: XposedModule) {
+    // Synchronizes the silence toggle state from DE storage / remote preferences
+    private fun syncState(module: XposedModule, classLoader: ClassLoader) {
         runCatching {
-            val prefs = module.getRemotePreferences(IpcManager.PREF_NAME)
-            isSilenceEnabled = prefs.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true)
+            val bundle = IpcManager.loadPreferences(module, classLoader, currentPkg)
+            isSilenceEnabled = bundle.getBoolean(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, false)
+            Logger.i(TAG, "Sync", "Settings synced: silenceEnabled=$isSilenceEnabled")
         }
     }
 
+    // Entry point: Decides which hooks to apply based on process identity
     fun hook(module: XposedModule, classLoader: ClassLoader, packageName: String) {
         currentPkg = packageName
-        syncState(module)
+        Logger.i(TAG, "Init", "Initializing CallNotesHook")
+        syncState(module, classLoader)
         val moduleUid = module.getModuleApplicationInfo().uid
 
-        // Secure context acquisition
+        // Register broadcast receiver: system_server uses SystemContext, app processes use Application.onCreate
         runCatching {
-            val appClass = if (packageName == "android") "com.android.server.SystemServer" else "android.app.Application"
-            val method = if (packageName == "android") "run" else "onCreate"
-            module.hook(classLoader.loadClass(appClass).getDeclaredMethod(method)).intercept { chain ->
-                val ctx = if (packageName == "android") IpcManager.getSystemContext(classLoader) else chain.thisObject as? Context
-                if (ctx != null) registerReceiver(ctx, moduleUid)
-                chain.proceed()
+            if (packageName == "android" || Process.myUid() == 1000) {
+                IpcManager.getSystemContext(classLoader)?.let { ctx ->
+                    registerReceiver(ctx, moduleUid)
+                }
+            } else {
+                val appClass = runCatching { classLoader.loadClass("android.app.Application") }.getOrNull()
+                if (appClass != null) {
+                    module.hookBefore(appClass.getDeclaredMethod("onCreate")) { chain ->
+                        val app = chain.thisObject as? Context
+                        if (app != null) registerReceiver(app, moduleUid)
+                    }
+                }
             }
+        }.onFailure { e ->
+            Logger.e(TAG, "Error", "Failed receiver registration in $packageName", e)
         }
 
-        // --- Execute Stealth Muting ---
-        hookMediaPlayer(module)
-        hookAudioTrack(module)
-        hookToneAndRingtone(module)
+        hookMediaPlayer(module) // Hook standard media player components
+        hookAudioTrack(module) // Hook low-level audio track components
+        hookToneAndRingtone(module) // Hook specialized tone generators
     }
 
+    // Intercepts MediaPlayer preparation to mute AI audio streams early
     private fun hookMediaPlayer(module: XposedModule) {
         val mpClass = MediaPlayer::class.java
-        // Hook all critical playback start points
         mpClass.declaredMethods.filter { it.name == "start" || it.name == "prepare" || it.name == "prepareAsync" }.forEach { m ->
             runCatching {
                 module.hookBefore(m) { chain ->
-                    if (isSilenceEnabled && isFermatCaller("MediaPlayer.${m.name}")) {
-                        (chain.thisObject as? MediaPlayer)?.runCatching { setVolume(0f, 0f) }
+                    val instance = chain.thisObject ?: return@hookBefore
+                    if (isSilenceEnabled && isFermatCaller("MediaPlayer.${m.name}", instance)) {
+                        (instance as? MediaPlayer)?.runCatching { setVolume(0f, 0f) }
                     }
                 }
             }
         }
     }
 
+    // Intercepts AudioTrack to zero out PCM data for AI recording prompts
     private fun hookAudioTrack(module: XposedModule) {
-        // Plan A: Instance Muting
         runCatching {
             AudioTrack::class.java.declaredConstructors.forEach { ctor ->
                 module.hookAfter(ctor) { chain, _ ->
-                    if (isSilenceEnabled && isFermatCaller("AudioTrackCtor")) {
-                        (chain.thisObject as? AudioTrack)?.runCatching { setVolume(0f) }
+                    val instance = chain.thisObject ?: return@hookAfter
+                    if (isSilenceEnabled && isFermatCaller("AudioTrackCtor", instance)) {
+                        (instance as? AudioTrack)?.runCatching { setVolume(0f) }
                     }
                 }
             }
         }
-        // Plan C: PCM Zeroing (Safety net)
+        
+        // Zeroes out actual PCM buffers for AI recording audio tracks
         AudioTrack::class.java.declaredMethods.filter { it.name == "write" }.forEach { m ->
             runCatching {
                 module.hookBefore(m) { chain ->
-                    if (isSilenceEnabled && isFermatCaller("AudioTrack.write")) {
+                    val instance = chain.thisObject ?: return@hookBefore
+                    if (isSilenceEnabled && isFermatCaller("AudioTrack.write", instance)) {
                         when (val buf = chain.args[0]) {
                             is ByteArray -> Arrays.fill(buf, 0.toByte())
                             is ShortArray -> Arrays.fill(buf, 0.toShort())
@@ -133,27 +148,49 @@ object CallNotesHook {
         }
     }
 
+    // Prevents audible beep/tones from AI recording components
     private fun hookToneAndRingtone(module: XposedModule) {
         runCatching {
             val m = ToneGenerator::class.java.getDeclaredMethod("startTone", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-            module.hookBefore(m) { if (isSilenceEnabled && isFermatCaller("ToneGenerator")) { /* Blocked */ } }
+            module.hook(m).intercept { chain ->
+                val instance = chain.thisObject
+                if (instance != null && isSilenceEnabled && isFermatCaller("ToneGenerator", instance)) {
+                    Logger.e(TAG, "Active", "Blocked ToneGenerator startTone from AI announcer")
+                    false
+                } else {
+                    chain.proceed()
+                }
+            }
         }
         runCatching {
             val m = Ringtone::class.java.getDeclaredMethod("play")
-            module.hookBefore(m) { if (isSilenceEnabled && isFermatCaller("Ringtone")) { /* Blocked */ } }
+            module.hook(m).intercept { chain ->
+                val instance = chain.thisObject
+                if (instance != null && isSilenceEnabled && isFermatCaller("Ringtone", instance)) {
+                    Logger.e(TAG, "Active", "Blocked Ringtone play from AI announcer")
+                    null
+                } else {
+                    chain.proceed()
+                }
+            }
         }
     }
 
+    // Registers a secure receiver to handle real-time setting updates
     private fun registerReceiver(context: Context, moduleUid: Int) {
         if (receiverRegistered) return
         IpcManager.registerSecureReceiver(context, moduleUid) { intent ->
-            val key = intent.getStringExtra(PreferenceKeys.EXTRA_KEY)
-            if (intent.action == IpcManager.ACTION_SETTINGS_SYNC) {
-                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, true)
-            } else if (key == PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT) {
-                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.EXTRA_VALUE, true)
+            val action = intent.action ?: return@registerSecureReceiver
+            if (action == IpcManager.ACTION_SETTINGS_SYNC) {
+                isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT, false)
+            } else {
+                val key = intent.getStringExtra(PreferenceKeys.EXTRA_KEY)
+                if (key == PreferenceKeys.DISABLE_CALL_NOTES_ANNOUNCEMENT) {
+                    isSilenceEnabled = intent.getBooleanExtra(PreferenceKeys.EXTRA_VALUE, false)
+                }
             }
-            Log.d(TAG, "[$currentPkg] Updated isSilenceEnabled: $isSilenceEnabled")
+            mutedInstances.clear() // Clear cache on change to re-evaluate new streams
+            Logger.i(TAG, "Sync", "isSilenceEnabled updated to: $isSilenceEnabled")
         }
         receiverRegistered = true
     }
